@@ -1,0 +1,197 @@
+---
+title: "PML_CP"
+author: "Brian Liswell"
+date: "12/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Executive Summary
+
+The goal of the project is to predict the manner in which people did the exercise.  This is the "classe" variable (factor A, B, C, D, E) in the training set.  HAR website for weight lifting exercise (WLE) says individuals were asked to perform "Unilateral Dumbbell Biceps Curl in five different fashions 
+
+* exactly according to the specification (Class A), 
+
+* throwing the elbows to the front (Class B), 
+
+* lifting the dumbbell only halfway (Class C),
+
+* lowering the dumbbell only halfway (Class D) 
+
+* and throwing the hips to the front (Class E)."
+
+
+Read more: http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises
+
+
+This report will describe:
+
+* 1. How the model was built
+
+* 2. How it was cross validationated
+The training data set will be broken up into two datasets: training and validation 
+
+* 3. The expected out of sample error
+The expected out of sample error should be similar to the validation error.
+The best prediction is simply using a random forest on 36 variables: 98% accurate.
+
+* 4. Why I made the awesome choices I made.
+See the body of text.
+
+* 5. Prediction on 20 different "test" cases.
+
+TEST PREDICTION: B A B A A E D B A A B C B A E E A B B B
+
+
+## Get the data
+```{r get_the_data}
+library(caret); 
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+download.file(train_url,"pml_training.csv")
+train_data <- read.csv("pml_training.csv")
+
+download.file(test_url,"pml_testing.csv")
+test_data <- read.csv("pml_testing.csv")
+
+```
+## Explore and describe the data
+
+The data looks awful.  The training set consists of 19622 observations, the acquisition of which is described in this paper:
+http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf
+
+The training set contains windows of time that supposedly correspond to someone doing an activity while moving a barbell.  At the end of each window of time various statistics are calculated for that window from each of the sensors.  For each of those rows occupied by statistics the "new_window" is occupied by "yes" rather than the default of "no".  
+
+It might be worthwhile to note that there is a column labeling error between the statistics calculated and the corresponding sensor column (ex: statistics for roll_belt are calculated on the yaw_belt column).  But that does not matter, because the test_data set does not contain any statistics, only consisting of random samplings of data (new_window = "no".)
+
+Each row of the data (both test and train) will be treated as independent of the other rows.  Training data being sampled from the same time window is irrelevant because the test_data is all from independent time windows.
+
+## Drop the junk columns
+The stats columns are empty in the test_data set, so drop them from both.  Also drop things like subject names and time info because who and when don't matter.
+
+```{r drop_junk}
+drop_junk <- function (data){
+        mn <- dim(data)
+        data <- data[,8:mn[2]]  #drop things like names and time columns
+        data <- data[,-grep("min",names(data))]
+        data <- data[,-grep("max",names(data))]
+        data <- data[,-grep("skewness",names(data))]
+        data <- data[,-grep("kurtosis",names(data))]
+        data <- data[,-grep("amplitude",names(data))]
+        data <- data[,-grep("stddev",names(data))]
+        data <- data[,-grep("var",names(data))]
+        data <- data[,-grep("avg",names(data))]
+}
+
+train_data <- drop_junk(train_data)
+test_data <- drop_junk(test_data)
+
+prob_id <- test_data[,ncol(test_data)]
+test_data <- test_data[,1:ncol(test_data)-1]  #drop the problem id last column in test_data
+casse <- train_data[,ncol(train_data)]
+```
+
+## Drop the redundant "gyro" columns
+
+The "gyro" channels are for Euler angles while the pitch, roll, yaw channels are highly correlated, just with a different transformation.
+
+
+```{r drop_gyro_junk}
+drop_pry <- function(data){
+        data <- data[,-grep("pitch",names(data))]
+        data <- data[,-grep("roll",names(data))]
+        data <- data[,-grep("yaw",names(data))]
+}
+train_data <- drop_pry(train_data)
+test_data <- drop_pry(test_data)
+```
+
+## Drop the "total accel" columns
+
+These are accelerometer data magnitudes from the x,y,z components.  Correlated data.
+
+```{r drop_accel_junk}
+train_data <- train_data[,-grep("total",names(train_data))]
+test_data <- test_data[,-grep("total",names(test_data))]
+```
+
+## Pull a validation data set from the train_data 
+```{r pull_out_valid}
+inTrain <- createDataPartition(y=train_data$classe,
+                              p=0.75, list=FALSE)
+valid_data<- train_data[-inTrain,]
+train_data<- train_data[inTrain,]
+
+```
+
+## Try reducing the remaining 36 variables with PCA
+
+It will make interpretation more difficult, but am I really going to spend my time thinking about these 36 variables?  
+
+Well it turns out 90% of the variance is explained by the first 12 variables.  I don't know if that is sufficient for doing the whole PCA process.  But 97% is described by the first 18.  The last 18 only describe 3%.  Does that add much or just confuse things?
+
+```{r PCA_the_data}
+
+T <- train_data[,1:ncol(train_data)-1]  #casse is last column
+#center the data
+for(n in seq(1,ncol(T))){T[,n] <- T[,n] - mean(T[,n])}
+
+#do singular value decomposition
+duv <- svd(T)  #d 1x36, u: 19622x36, v: 36x36
+#show proportion of explanation to total variance from each component.
+print(round(cumsum(duv$d)/sum(duv$d),2))
+
+#create alternative training datasets
+preProc12 <- preProcess(T,method="pca",pcaComp=12)
+Tpred12 <- predict(preProc12,T)
+
+preProc18 <- preProcess(T,method="pca",pcaComp=18)
+Tpred18 <- predict(preProc18,T)
+
+
+#create alternative validation datasets
+V <- valid_data[,1:ncol(train_data)-1]  #casse is last column
+#center the data
+for(n in seq(1,ncol(V))){V[,n] <- V[,n] - mean(V[,n])}
+Vpred12 <- predict(preProc12,V)
+Vpred18 <- predict(preProc18,V)
+
+
+```
+
+## Train a random forest classifier between train_data, Tpred12 and Tpred18 get predictions for the valid_data
+
+```{r rf_the_data}
+#put classe in the PCA data
+Tpred12$classe <- train_data$classe
+Tpred18$classe <- train_data$classe
+
+modFit <- train(classe~ .,data=train_data,method="rf",ntree = 25)
+modFit12 <- train(classe~ .,data=Tpred12,method="rf",ntree = 25)
+modFit18 <- train(classe~ .,data=Tpred18,method="rf",ntree = 25)
+
+modpred <- predict(modFit,valid_data)
+modpred12 <- predict(modFit12,Vpred12)
+modpred18 <- predict(modFit18,Vpred18)
+
+CMTX <- confusionMatrix(valid_data$classe,modpred)
+CMTX12 <- confusionMatrix(valid_data$classe,modpred12)
+CMTX18 <- confusionMatrix(valid_data$classe,modpred18)
+```
+
+The three models under consideration have the following accuracies:
+**Straight Random Forest on 36 variables `r 100*round(CMTX$overall['Accuracy'],3) `%**
+**Random Forest on PCA reduced to 12 variables `r 100*round(CMTX$overall['Accuracy'],3) `%**
+**Random Forest on PCA reduced to 18 variables `r 100*round(CMTX$overall['Accuracy'],3) `%**
+
+## Predict on the Test
+Because the Straight Random Forest performed so well the PCA-reduced methods will be dropped
+
+```{r test_the_data}
+test_pred <- predict(modFit,test_data)
+print(test_pred)
+```
